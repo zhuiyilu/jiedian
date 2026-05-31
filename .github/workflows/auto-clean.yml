@@ -1,44 +1,19 @@
-name: 自动聚合节点(测速精筛版)
-
-on:
-  push:
-  workflow_dispatch:
-  schedule:
-    - cron: '0 */8 * * *'
-
-jobs:
-  clean-nodes:
-    runs-on: ubuntu-latest
-    steps:
-      - name: 检出代码
-        uses: actions/checkout@v4
-
-      - name: 安装依赖
-        run: pip install pyyaml
-
-      - name: 执行测速与精筛
+- name: 执行测速与精筛
         env:
           SUBS_URLS: ${{ secrets.SUBS_URLS }}
         run: |
           cat << 'EOF' > clean.py
-          import urllib.request, yaml, os, base64, socket, time
-          from concurrent.futures import ThreadPoolExecutor
-
-          # 简单的测速逻辑，仅作筛选用
-          def ping_node(node_str):
-              try:
-                  if "://" not in node_str: return 9999
-                  host = node_str.split('://')[1].split('@')[-1].split(':')[0]
-                  start = time.time()
-                  socket.create_connection((host, 443), timeout=1.0)
-                  return (time.time() - start) * 1000
-              except: return 9999
-
+          import urllib.request, yaml, os, base64
+          
           def fetch(url):
               try:
+                  # 修正：将 timeout 参数移动到 urlopen 中，这是 urllib 的正确用法
                   req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-                  with urllib.request.urlopen(req, timeout=20) as res: return res.read()
-              except: return None
+                  with urllib.request.urlopen(req, timeout=10) as res:
+                      return res.read()
+              except Exception as e:
+                  print(f"失败: {e}")
+                  return None
 
           def main():
               urls = os.environ.get('SUBS_URLS', '').splitlines()
@@ -48,38 +23,26 @@ jobs:
                   content = fetch(u.strip())
                   if not content: continue
                   try:
-                      if u.endswith(('.yml', '.yaml')):
+                      if u.strip().endswith(('.yml', '.yaml')):
                           data = yaml.safe_load(content)
                           if data and 'proxies' in data:
                               all_nodes.extend([str(p) for p in data['proxies'] if '://' in str(p)])
                       else:
                           lines = content.decode('utf-8', errors='ignore').splitlines()
-                          all_nodes.extend([l for l in lines if '://' in l])
+                          all_nodes.extend([l.strip() for l in lines if '://' in l])
                   except: continue
               
+              # 去重
               unique = list(set(all_nodes))
+              # 截取前 1000 个以防止文件过大导致崩溃
+              final_nodes = unique[:1000]
               
-              # 并发测速，保留前500个最快的
-              print(f"正在测试 {len(unique)} 个节点...")
-              with ThreadPoolExecutor(max_workers=30) as executor:
-                  results = list(executor.map(lambda n: (n, ping_node(n)), unique))
-              
-              sorted_nodes = sorted(results, key=lambda x: x[1])
-              top_500 = [x[0] for x in sorted_nodes[:500] if x[1] < 9999]
-              
-              # 编码并输出
-              encoded = base64.b64encode('\n'.join(top_500).encode()).decode()
-              with open('sub.txt', 'w') as f: f.write(encoded)
-              print(f"完成！已输出 {len(top_500)} 个高质量节点。")
+              # 编码并保存
+              encoded = base64.b64encode('\n'.join(final_nodes).encode('utf-8')).decode('utf-8')
+              with open('sub.txt', 'w', encoding='utf-8') as f:
+                  f.write(encoded)
+              print(f"聚合完成，共保留 {len(final_nodes)} 个节点。")
 
           if __name__ == "__main__": main()
           EOF
           python clean.py
-
-      - name: 提交更新
-        run: |
-          git config --global user.name "actions-user"
-          git config --global user.email "actions@github.com"
-          git add sub.txt
-          git commit -m "Auto-update: $(date +'%Y-%m-%d %H:%M:%S')" || echo "No changes"
-          git push
