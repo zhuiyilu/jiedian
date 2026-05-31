@@ -4,7 +4,7 @@ on:
   push:
   workflow_dispatch:
   schedule:
-    - cron: '0 */8 * * *' # 核心修改：改为每 8 小时运行一次
+    - cron: '0 */8 * * *' 
 
 jobs:
   clean-nodes:
@@ -17,11 +17,10 @@ jobs:
         run: |
           pip install pyyaml
 
-      - name: 纯本地并发真连接测活
+      - name: 执行清洗与聚合
         env:
           SUBS_URLS: ${{ secrets.SUBS_URLS }}
         run: |
-          # 这里写入新的支持 YAML 的 clean.py 逻辑
           cat << 'EOF' > clean.py
           import urllib.request
           import yaml
@@ -30,25 +29,43 @@ jobs:
           def fetch_and_parse(url):
               print(f"正在处理: {url}")
               try:
-                  req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=15)
-                  with urllib.request.urlopen(req, timeout=15) as response:
+                  # 标准请求写法，兼容性强
+                  req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+                  with urllib.request.urlopen(req, timeout=20) as response:
                       content = response.read()
+                      
+                      # 智能判断格式
                       if url.endswith(('.yml', '.yaml')):
                           data = yaml.safe_load(content)
-                          return [str(p) for p in data.get('proxies', [])]
+                          if data and 'proxies' in data:
+                              # 提取节点并转为字符串
+                              return [str(p) for p in data['proxies']]
                       else:
                           lines = content.decode('utf-8', errors='ignore').splitlines()
-                          return [l.strip() for l in lines if any(p in l for p in ['vmess://','vless://','ss://','trojan://'])]
+                          # 宽容模式：保留所有有内容的行
+                          return [l.strip() for l in lines if len(l.strip()) > 10]
+                          
               except Exception as e:
                   print(f"失败: {e}")
                   return []
+              return []
 
           def main():
               urls = os.environ.get('SUBS_URLS', '').splitlines()
-              all_nodes = list(set([n for u in urls if u.strip() for n in fetch_and_parse(u.strip())]))
+              all_nodes = []
+              for u in urls:
+                  if u.strip():
+                      all_nodes.extend(fetch_and_parse(u.strip()))
+              
+              # 去重
+              unique_nodes = list(set(all_nodes))
+              
+              # 写入 sub.txt
               with open('sub.txt', 'w', encoding='utf-8') as f:
-                  f.write('\n'.join(all_nodes))
-              print(f"聚合完成，共 {len(all_nodes)} 个节点")
+                  f.write('\n'.join(unique_nodes))
+              print(f"================")
+              print(f"聚合完成，共 {len(unique_nodes)} 个唯一节点。")
+              print(f"================")
 
           if __name__ == "__main__":
               main()
@@ -60,5 +77,5 @@ jobs:
           git config --global user.name "actions-user"
           git config --global user.email "actions@github.com"
           git add sub.txt
-          git commit -m "Update nodes every 8 hours" || echo "No changes"
+          git commit -m "Update nodes: $(date +'%Y-%m-%d %H:%M:%S')" || echo "No changes"
           git push
