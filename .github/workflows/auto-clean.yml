@@ -1,23 +1,22 @@
-name: 自动合并并真连接测活(硬核纯净版)
+name: 自动合并订阅(高性能精筛版)
 
 on:
   push:
   workflow_dispatch:
   schedule:
-    - cron: '0 */8 * * *' 
+    - cron: '0 */8 * * *'
 
 jobs:
   clean-nodes:
     runs-on: ubuntu-latest
     steps:
-      - name: 检出仓库代码
+      - name: 检出代码
         uses: actions/checkout@v4
 
-      - name: 安装 Python 依赖
-        run: |
-          pip install pyyaml
+      - name: 安装依赖
+        run: pip install pyyaml
 
-      - name: 执行清洗与聚合
+      - name: 执行高效清洗与编码
         env:
           SUBS_URLS: ${{ secrets.SUBS_URLS }}
         run: |
@@ -25,57 +24,56 @@ jobs:
           import urllib.request
           import yaml
           import os
+          import base64
+
+          def is_valid(line):
+              # 严格筛选：长度至少40字符，且包含核心协议头
+              protos = ['vmess://', 'vless://', 'ss://', 'trojan://', 'hysteria2://', 'tuic://']
+              line = line.strip()
+              return len(line) > 40 and any(p in line for p in protos)
 
           def fetch_and_parse(url):
               print(f"正在处理: {url}")
               try:
-                  # 标准请求写法，兼容性强
                   req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
                   with urllib.request.urlopen(req, timeout=20) as response:
                       content = response.read()
-                      
-                      # 智能判断格式
+                      nodes = []
                       if url.endswith(('.yml', '.yaml')):
                           data = yaml.safe_load(content)
                           if data and 'proxies' in data:
-                              # 提取节点并转为字符串
-                              return [str(p) for p in data['proxies']]
+                              nodes = [str(p) for p in data['proxies'] if is_valid(str(p))]
                       else:
                           lines = content.decode('utf-8', errors='ignore').splitlines()
-                          # 宽容模式：保留所有有内容的行
-                          return [l.strip() for l in lines if len(l.strip()) > 10]
-                          
+                          nodes = [l.strip() for l in lines if is_valid(l)]
+                      print(f"-> 提取到有效节点: {len(nodes)}")
+                      return nodes
               except Exception as e:
-                  print(f"失败: {e}")
+                  print(f"处理 {url} 失败: {e}")
                   return []
-              return []
 
           def main():
               urls = os.environ.get('SUBS_URLS', '').splitlines()
-              all_nodes = []
-              for u in urls:
-                  if u.strip():
-                      all_nodes.extend(fetch_and_parse(u.strip()))
+              all_nodes = list(set([n for u in urls if u.strip() for n in fetch_and_parse(u.strip())]))
               
-              # 去重
-              unique_nodes = list(set(all_nodes))
+              # 转换为标准订阅格式并进行 Base64 编码
+              combined = '\n'.join(all_nodes)
+              encoded = base64.b64encode(combined.encode('utf-8')).decode('utf-8')
               
-              # 写入 sub.txt
               with open('sub.txt', 'w', encoding='utf-8') as f:
-                  f.write('\n'.join(unique_nodes))
+                  f.write(encoded)
               print(f"================")
-              print(f"聚合完成，共 {len(unique_nodes)} 个唯一节点。")
-              print(f"================")
+              print(f"聚合完毕，最终保留 {len(all_nodes)} 个节点，已编码输出。")
 
           if __name__ == "__main__":
               main()
           EOF
           python clean.py
 
-      - name: 提交并推送
+      - name: 提交更新
         run: |
           git config --global user.name "actions-user"
           git config --global user.email "actions@github.com"
           git add sub.txt
-          git commit -m "Update nodes: $(date +'%Y-%m-%d %H:%M:%S')" || echo "No changes"
+          git commit -m "Auto-update: $(date +'%Y-%m-%d %H:%M:%S')" || echo "No changes"
           git push
