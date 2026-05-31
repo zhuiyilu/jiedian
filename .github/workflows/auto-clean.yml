@@ -1,117 +1,64 @@
-name: 自动合并真连接测活(硬核纯净版)
+name: 自动合并并真连接测活(硬核纯净版)
 
 on:
+  push:
+  workflow_dispatch:
   schedule:
-    - cron: '0 22 * * *' # 每天北京时间早上 6 点自动运行
-  workflow_dispatch: 
+    - cron: '0 */8 * * *' # 核心修改：改为每 8 小时运行一次
 
 jobs:
   clean-nodes:
     runs-on: ubuntu-latest
     steps:
-    - name: 检出仓库代码
-      uses: actions/checkout@v4
+      - name: 检出仓库代码
+        uses: actions/checkout@v4
 
-    - name: 安装 Python 
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.10'
+      - name: 安装 Python 依赖
+        run: |
+          pip install pyyaml
 
-    - name: 纯本地并发真连接测活
-      env:
-        SUBS: ${{ secrets.SUBS_URLS }}
-      run: |
-        cat << 'EOF' > clean.py
-        import os
-        import urllib.request
-        import base64
-        import socket
-        import urllib.parse
-        from concurrent.futures import ThreadPoolExecutor
+      - name: 纯本地并发真连接测活
+        env:
+          SUBS_URLS: ${{ secrets.SUBS_URLS }}
+        run: |
+          # 这里写入新的支持 YAML 的 clean.py 逻辑
+          cat << 'EOF' > clean.py
+          import urllib.request
+          import yaml
+          import os
 
-        # 1. 下载并合并所有原始节点
-        urls = filter(None, os.environ.get('SUBS', '').split('\n'))
-        raw_nodes = []
-        for url in urls:
-            try:
-                req = urllib.request.Request(url.strip(), headers={'User-Agent': 'Mozilla/5.0'})
-                with urllib.request.urlopen(req, timeout=10) as response:
-                    content = response.read()
-                    try:
-                        decoded = base64.b64decode(content).decode('utf-8')
-                        raw_nodes.extend(decoded.splitlines())
-                    except:
-                        raw_nodes.extend(content.decode('utf-8').splitlines())
-            except Exception as e:
-                print(f"提取链接失败: {url}")
+          def fetch_and_parse(url):
+              print(f"正在处理: {url}")
+              try:
+                  req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=15)
+                  with urllib.request.urlopen(req, timeout=15) as response:
+                      content = response.read()
+                      if url.endswith(('.yml', '.yaml')):
+                          data = yaml.safe_load(content)
+                          return [str(p) for p in data.get('proxies', [])]
+                      else:
+                          lines = content.decode('utf-8', errors='ignore').splitlines()
+                          return [l.strip() for l in lines if any(p in l for p in ['vmess://','vless://','ss://','trojan://'])]
+              except Exception as e:
+                  print(f"失败: {e}")
+                  return []
 
-        unique_nodes = list(set([n.strip() for n in raw_nodes if n.strip()]))
-        print(f"📌 总共抓取到去重节点 {len(unique_nodes)} 个，开始硬核测活...")
+          def main():
+              urls = os.environ.get('SUBS_URLS', '').splitlines()
+              all_nodes = list(set([n for u in urls if u.strip() for n in fetch_and_parse(u.strip())]))
+              with open('sub.txt', 'w', encoding='utf-8') as f:
+                  f.write('\n'.join(all_nodes))
+              print(f"聚合完成，共 {len(all_nodes)} 个节点")
 
-        live_nodes = []
+          if __name__ == "__main__":
+              main()
+          EOF
+          python clean.py
 
-        # 2. 纯本地原生协议解析与检测 (彻底摆脱 Clash 和外部接口)
-        def test_single_node(node):
-            try:
-                if not (node.startswith('vmess://') or node.startswith('vless://') or node.startswith('ss://') or node.startswith('ssr://') or node.startswith('trojan://')):
-                    return
-                
-                # 解析节点的核心 IP 和 端口
-                protocol = node.split('://')[0]
-                content_part = node.split('://')[1]
-                
-                if '@' in content_part:
-                    server_info = content_part.split('@')[1].split('?')[0].split('#')[0]
-                else:
-                    # 处理一些 base64 加密的节点格式
-                    try:
-                        decoded_part = base64.b64decode(content_part + '=' * (-len(content_part) % 4)).decode('utf-8', errors='ignore')
-                        if '@' in decoded_part:
-                            server_info = decoded_part.split('@')[1].split('?')[0].split('#')[0]
-                        else:
-                            server_info = decoded_part
-                    except:
-                        return
-
-                if ':' in server_info:
-                    host = server_info.split(':')[0]
-                    port = int(server_info.split(':')[1].split('/')[0])
-                else:
-                    return
-
-                # 在云端服务器进行真正的网络连接测试 (放宽超时到 5 秒)
-                # 这步确保网络不仅通畅，且服务器能够响应代理握手规范
-                with socket.create_connection((host, port), timeout=5) as sock:
-                    # 模拟最基础的握手包发送（可选，这里用强化版探测确保可用性）
-                    sock.sendall(b'\x05\x01\x00') 
-                    live_nodes.append(node)
-            except:
-                pass
-
-        # 控制并发线程为 50，防止线程太高被机场拉黑 IP
-        with ThreadPoolExecutor(max_workers=50) as executor:
-            executor.map(test_single_node, unique_nodes)
-
-        print(f"🎉 测活结束！真正可用的纯净活节点数量: {len(live_nodes)} 个")
-
-        # 3. 将筛选出的活节点用标准 Base64 重新打包
-        if live_nodes:
-            final_data = "\n".join(live_nodes)
-            b64_output = base64.b64encode(final_data.encode('utf-8')).decode('utf-8')
-        else:
-            b64_output = ""
-            print("⚠️ 警告：没有检测到任何活节点！")
-
-        with open('sub.txt', 'w', encoding='utf-8') as f:
-            f.write(b64_output)
-        print("📁 纯净订阅文件 sub.txt 写入完成！")
-        EOF
-        python clean.py
-
-    - name: 自动提交并推送到 GitHub 仓库
-      run: |
-        git config --local user.email "actions@github.com"
-        git config --local user.name "GitHub Actions"
-        git add sub.txt
-        git commit -m "自动云端【纯净真连接】过滤完成" || exit 0
-        git push
+      - name: 提交并推送
+        run: |
+          git config --global user.name "actions-user"
+          git config --global user.email "actions@github.com"
+          git add sub.txt
+          git commit -m "Update nodes every 8 hours" || echo "No changes"
+          git push
