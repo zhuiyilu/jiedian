@@ -1,20 +1,33 @@
-- name: 执行测速与精筛
+name: 自动聚合节点
+
+on:
+  push:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 */8 * * *'
+
+jobs:
+  clean-nodes:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装依赖
+        run: pip install pyyaml
+
+      - name: 执行清洗
         env:
           SUBS_URLS: ${{ secrets.SUBS_URLS }}
         run: |
           cat << 'EOF' > clean.py
           import urllib.request, yaml, os, base64
-          
           def fetch(url):
               try:
-                  # 修正：将 timeout 参数移动到 urlopen 中，这是 urllib 的正确用法
                   req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
                   with urllib.request.urlopen(req, timeout=10) as res:
                       return res.read()
-              except Exception as e:
-                  print(f"失败: {e}")
-                  return None
-
+              except: return None
           def main():
               urls = os.environ.get('SUBS_URLS', '').splitlines()
               all_nodes = []
@@ -31,18 +44,20 @@
                           lines = content.decode('utf-8', errors='ignore').splitlines()
                           all_nodes.extend([l.strip() for l in lines if '://' in l])
                   except: continue
-              
-              # 去重
               unique = list(set(all_nodes))
-              # 截取前 1000 个以防止文件过大导致崩溃
               final_nodes = unique[:1000]
-              
-              # 编码并保存
               encoded = base64.b64encode('\n'.join(final_nodes).encode('utf-8')).decode('utf-8')
               with open('sub.txt', 'w', encoding='utf-8') as f:
                   f.write(encoded)
               print(f"聚合完成，共保留 {len(final_nodes)} 个节点。")
-
           if __name__ == "__main__": main()
           EOF
           python clean.py
+
+      - name: 提交更新
+        run: |
+          git config --global user.name "actions-user"
+          git config --global user.email "actions@github.com"
+          git add sub.txt
+          git commit -m "Auto-update: $(date +'%Y-%m-%d %H:%M:%S')" || echo "No changes"
+          git push
