@@ -1,4 +1,4 @@
-name: 自动聚合节点
+name: 自动聚合节点(详情版)
 
 on:
   push:
@@ -21,7 +21,7 @@ jobs:
           SUBS_URLS: ${{ secrets.SUBS_URLS }}
         run: |
           cat << 'EOF' > clean.py
-          import urllib.request, base64
+          import urllib.request, base64, os, yaml
 
           def fetch(url):
               try:
@@ -29,52 +29,65 @@ jobs:
                   with urllib.request.urlopen(req, timeout=20) as res:
                       return res.read()
               except Exception as e:
-                  print(f"请求失败: {url}, 原因: {e}")
+                  print(f"!!! 链接读取失败: {url} | 错误: {e}")
                   return None
 
           def decode_content(content):
               try:
-                  # 尝试 Base64 解码
                   return base64.b64decode(content).decode('utf-8', errors='ignore')
               except:
-                  # 如果不是 Base64，直接返回原文
                   return content.decode('utf-8', errors='ignore')
 
           def main():
-              urls = os.environ.get('SUBS_URLS', '').splitlines()
+              raw_secrets = os.environ.get('SUBS_URLS', '')
+              urls = [u.strip() for u in raw_secrets.splitlines() if u.strip()]
+              
+              print(f"=== 开始聚合，共检测到 {len(urls)} 个订阅源 ===")
               all_nodes = []
               
-              for u in urls:
-                  u = u.strip()
-                  if not u: continue
-                  
-                  raw_data = fetch(u)
-                  if not raw_data: continue
+              for i, url in enumerate(urls, 1):
+                  print(f"--> 处理第 {i} 个源: {url}")
+                  raw_data = fetch(url)
+                  if not raw_data: 
+                      print(f"    -> 第 {i} 个源读取为空。")
+                      continue
                   
                   decoded_text = decode_content(raw_data)
                   
-                  # 核心逻辑：按行分割，只要包含协议头的都是节点
-                  for line in decoded_text.splitlines():
-                      line = line.strip()
-                      if '://' in line:
-                          all_nodes.append(line)
+                  count = 0
+                  # 检查是否为 YAML 格式
+                  if decoded_text.strip().startswith(('proxies:', '---')):
+                      try:
+                          data = yaml.safe_load(decoded_text)
+                          if data and 'proxies' in data:
+                              for p in data['proxies']:
+                                  node = str(p)
+                                  if '://' in node:
+                                      all_nodes.append(node)
+                                      count += 1
+                      except: pass
+                  
+                  # 检查是否为普通节点列表
+                  if count == 0:
+                      for line in decoded_text.splitlines():
+                          line = line.strip()
+                          if '://' in line:
+                              all_nodes.append(line)
+                              count += 1
+                  
+                  print(f"    -> 成功提取: {count} 个节点")
               
-              # 去重
               unique_nodes = list(set(all_nodes))
+              print(f"=== 聚合结束，去重后共保留 {len(unique_nodes)} 个节点 ===")
               
-              # 编码并输出
               if unique_nodes:
-                  combined = '\n'.join(unique_nodes)
-                  encoded = base64.b64encode(combined.encode('utf-8')).decode('utf-8')
+                  encoded = base64.b64encode('\n'.join(unique_nodes).encode('utf-8')).decode('utf-8')
                   with open('sub.txt', 'w', encoding='utf-8') as f:
                       f.write(encoded)
-                  print(f"成功提取并保存了 {len(unique_nodes)} 个节点。")
               else:
-                  print("未发现有效节点。")
+                  print("!!! 未能提取到任何有效节点，请检查订阅链接是否可用。")
 
-          if __name__ == "__main__":
-              import os
-              main()
+          if __name__ == "__main__": main()
           EOF
           python clean.py
 
